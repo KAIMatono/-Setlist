@@ -802,6 +802,43 @@ ENCORE
     }, 180);
   }
 
+  function extractTop5FromRankingDom() {
+    if (typeof renderStats === 'function') {
+      renderStats();
+    }
+
+    const container = document.getElementById('song-ranking-list');
+    if (!container) return [];
+
+    const results = [];
+    const rows = container.querySelectorAll(':scope > div');
+
+    for (const row of rows) {
+      const text = (row.innerText || '').trim();
+      if (!text || text.includes('還沒有參戰場次')) continue;
+
+      const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
+      if (lines.length < 2) continue;
+
+      const candidates = lines.filter(
+        l => !/^\d+$/.test(l) && !l.includes('比例 =') && !l.includes('按次數') && !l.includes('按比例')
+      );
+
+      const metricLine = candidates.find(l => /\d+\s*次|\d+(?:\.\d+)?%/.test(l)) || '';
+      const titleLine = candidates.find(l => l !== metricLine) || '';
+
+      if (titleLine && !results.some(item => item.title === titleLine)) {
+        results.push({
+          title: titleLine,
+          metric: metricLine
+        });
+      }
+      if (results.length >= 5) break;
+    }
+
+    return results;
+  }
+
   function getUserReportStats() {
     const customNickname = getSavedNickname();
     const statsTab = document.body.innerText;
@@ -826,28 +863,7 @@ ENCORE
       return { year: y, count: m ? parseInt(m[1], 10) : 0 };
     });
 
-    const top5 = [];
-    const rankSection = statsTab.split('現場聽過歌曲排行與出現比例')[1]?.split('尚未在現場聽過的曲目清單')[0] || '';
-    const lines = rankSection.split('\n').map(s => s.trim()).filter(Boolean);
-
-    for (let i = 0; i < lines.length; i++) {
-      const pctMatch = lines[i].match(/^(\d+(?:\.\d+)?%)$/);
-      const cntMatch = lines[i].match(/^(\d+)\s*次$/);
-      if (pctMatch || cntMatch) {
-        let title = '';
-        for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
-          if (!/^\d+$/.test(lines[j]) && !lines[j].includes('比例 =') && !lines[j].includes('按次數')) {
-            title = lines[j];
-            break;
-          }
-        }
-        const detail = [lines[i], lines[i + 1]].filter(s => s && (/次$/.test(s) || /%$/.test(s))).join(' · ');
-        if (title && !top5.some(item => item.title === title)) {
-          top5.push({ title, metric: detail });
-        }
-        if (top5.length >= 5) break;
-      }
-    }
+    const top5 = extractTop5FromRankingDom();
 
     // 留空就不顯示 ID，避免洩漏同步空間代碼
     const badgeText = customNickname ? ` ${customNickname}` : '';

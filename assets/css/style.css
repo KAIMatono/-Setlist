@@ -1,0 +1,51 @@
+    :root {
+      --bg-page: #FFFDFE;
+      --bg-card: #FFF5F8;
+      --accent-sakura: #F19DB5;
+      --text-primary: #2D1E24;
+      --text-muted: #6E535C;
+      --border-pink: #F6DCE4;
+    }
+
+    html, body {
+      background-color: #FFFDFE;
+      color: #2D1E24;
+      font-family: 'Inter', 'Noto Sans TC', sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    .accordion-panel {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.28s ease;
+    }
+    .accordion-panel.is-open {
+      grid-template-rows: 1fr;
+    }
+    .accordion-inner {
+      overflow: hidden;
+    }
+
+    /* Softened background photo layer inside expanded setlist panel */
+    .setlist-bg-photo {
+      opacity: 0.36;
+      filter: blur(1px) saturate(0.98) contrast(1);
+      transform: scale(1.02);
+      transition: opacity 0.25s ease;
+    }
+
+    /* Keep text crisp directly over the softened background photo without white boxes */
+    .setlist-text-shadow {
+      text-shadow:
+        0 1px 8px rgba(255, 253, 254, 0.95),
+        0 0 14px rgba(255, 253, 254, 0.9);
+    }
+  

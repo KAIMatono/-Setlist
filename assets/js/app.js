@@ -1,6 +1,6 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    import { getFirestore, doc, getDoc, setDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     const cloudBridge = {
       appId: typeof __app_id !== 'undefined' && __app_id ? String(__app_id) : 'sakurazaka46-setlist-default',
@@ -23,6 +23,22 @@
     const STORAGE_KEY_HIDDEN_UNPLAYED = 'sakurazaka46_setlist_hidden_unplayed_v1';
     const STORAGE_KEY_ADMIN_UNLOCKED = 'sakurazaka46_setlist_admin_v1';
     const ADMIN_PASSCODE = 'sakura46';
+
+    // Firebase 專案設定（Web 設定值本身可公開，資料存取安全由 Firestore 規則把關）
+    const FIREBASE_CONFIG = {
+      apiKey: "AIzaSyDbTI5YqtkXzuzgzft3I-cPa79Wyy6LNAA",
+      authDomain: "sakurazakasetlist.firebaseapp.com",
+      projectId: "sakurazakasetlist",
+      storageBucket: "sakurazakasetlist.firebasestorage.app",
+      messagingSenderId: "665013839473",
+      appId: "1:665013839473:web:bf48472375a9f9dcbe5dd0",
+      measurementId: "G-M4CKZQGZ44"
+    };
+    const COL_PROFILES = 'user_profiles';
+    const COL_SHARED = 'shared_setlists';
+    const STORAGE_KEY_SYNC_META = 'sakurazaka46_setlist_sync_meta_v1';
+    const STORAGE_KEY_CLOUD_BACKUP = 'sakurazaka46_setlist_backup_before_cloud_v1';
+    const SHARED_DOC_SOFT_LIMIT = 900 * 1024;
 
     function readEmbeddedBuiltinEvents() {
       if (Array.isArray(window.BUILTIN_EVENTS) && window.BUILTIN_EVENTS.length > 0) {
@@ -326,34 +342,151 @@
       }
     }
 
+    // ---- Firestore 路徑 ----
+    // 個人參戰紀錄：user_profiles/{userId}
+    // 共用歌單／新增場次：shared_setlists/{docKey}
     function getPrivateUserDocRef(profileId) {
       if (!cloudBridge.db || !profileId) return null;
-      return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'users', String(profileId), 'sakurazaka_setlist', 'attendance');
+      return doc(cloudBridge.db, COL_PROFILES, String(profileId));
     }
 
     function getSharedSetlistDocRef() {
       if (!cloudBridge.db) return null;
       const docKey = cloudBridge.sharedCatalogId || 'shared_catalog';
-      return doc(cloudBridge.db, 'artifacts', cloudBridge.appId, 'public', 'data', 'sakurazaka_setlist', docKey);
+      return doc(cloudBridge.db, COL_SHARED, docKey);
     }
 
+    // ---- 同步時間戳（本機） ----
+    function readSyncMeta() {
+      const m = safeReadStorage(STORAGE_KEY_SYNC_META, {});
+      return {
+        attendance: {
+          clientUpdatedAt: Number(m && m.attendance && m.attendance.clientUpdatedAt) || 0,
+          profileId: String((m && m.attendance && m.attendance.profileId) || '')
+        },
+        setlist: {
+          clientUpdatedAt: Number(m && m.setlist && m.setlist.clientUpdatedAt) || 0
+        }
+      };
+    }
+
+    function writeSyncMeta(meta) {
+      safeWriteStorage(STORAGE_KEY_SYNC_META, meta);
+    }
+
+    // 本機有實際修改時呼叫；時間戳單調遞增，避免裝置時鐘落後時被雲端舊資料蓋過
+    function touchLocalMeta(scope) {
+      const meta = readSyncMeta();
+      const now = Date.now();
+      if (scope === 'attendance' || scope === 'all') {
+        meta.attendance.clientUpdatedAt = Math.max(now, meta.attendance.clientUpdatedAt + 1);
+      }
+      if (scope === 'setlist' || scope === 'all') {
+        meta.setlist.clientUpdatedAt = Math.max(now, meta.setlist.clientUpdatedAt + 1);
+      }
+      writeSyncMeta(meta);
+    }
+
+    function remoteClientTs(data) {
+      if (!data || typeof data !== 'object') return 0;
+      const c = Number(data.clientUpdatedAt);
+      if (Number.isFinite(c) && c > 0) return c;
+      const u = data.updatedAt;
+      if (u && typeof u.toMillis === 'function') return u.toMillis();
+      if (typeof u === 'string') {
+        const p = Date.parse(u);
+        if (Number.isFinite(p)) return p;
+      }
+      return 0;
+    }
+
+    function markCloudSynced() {
+      cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
+      cloudBridge.syncState = 'synced';
+      updateSyncUi();
+    }
+
+    function markCloudError(err, where) {
+      console.warn('[cloud]', where || '', (err && (err.code || err.message)) || err);
+      cloudBridge.syncState = 'error';
+      updateSyncUi();
+    }
+
+    // ---- 內容比對與本機備份 ----
+    function localAttendanceHasData() {
+      return appState.attendedIds.size > 0 ||
+        appState.extraUnplayedSongs.length > 0 ||
+        appState.hiddenUnplayedKeys.size > 0;
+    }
+
+    function attendanceEquals(data) {
+      const a = JSON.stringify([...appState.attendedIds].sort());
+      const b = JSON.stringify((Array.isArray(data && data.attendedIds) ? data.attendedIds.map(String) : []).sort());
+      return a === b;
+    }
+
+    function localSetlistHasData() {
+      return appState.customEvents.length > 0 || Object.keys(appState.eventOverrides).length > 0;
+    }
+
+    function sharedContentEquals(data) {
+      const local = JSON.stringify({
+        customEvents: appState.customEvents,
+        eventOverrides: appState.eventOverrides
+      });
+      const remote = JSON.stringify({
+        customEvents: Array.isArray(data && data.customEvents) ? data.customEvents : [],
+        eventOverrides: (data && data.eventOverrides && typeof data.eventOverrides === 'object' && !Array.isArray(data.eventOverrides)) ? data.eventOverrides : {}
+      });
+      return local === remote;
+    }
+
+    // 以雲端資料取代本機前，先把本機內容留一份備份（只保留最近一份）
+    function backupLocalBeforeCloudOverwrite(scope) {
+      try {
+        if (scope === 'attendance') {
+          safeWriteStorage(STORAGE_KEY_CLOUD_BACKUP + '_attendance', {
+            savedAt: new Date().toISOString(),
+            attendedIds: [...appState.attendedIds],
+            extraUnplayedSongs: appState.extraUnplayedSongs,
+            hiddenUnplayedKeys: [...appState.hiddenUnplayedKeys]
+          });
+        } else {
+          safeWriteStorage(STORAGE_KEY_CLOUD_BACKUP + '_setlist', {
+            savedAt: new Date().toISOString(),
+            customEvents: appState.customEvents,
+            eventOverrides: appState.eventOverrides
+          });
+        }
+      } catch (_err) {
+        // 備份失敗不影響同步
+      }
+    }
+
+    // ---- 序列化（寫入雲端）----
+    // updatedAt：Firestore 伺服器時間；clientUpdatedAt：本機最後修改時間（毫秒），用於跨裝置新舊比對
     function serializePrivateAttendance() {
+      const meta = readSyncMeta();
       return {
         attendedIds: [...appState.attendedIds],
         extraUnplayedSongs: appState.extraUnplayedSongs,
         hiddenUnplayedKeys: [...appState.hiddenUnplayedKeys],
-        updatedAt: new Date().toISOString()
+        clientUpdatedAt: meta.attendance.clientUpdatedAt || Date.now(),
+        updatedAt: serverTimestamp()
       };
     }
 
     function serializeSharedSetlists() {
+      const meta = readSyncMeta();
       return {
         customEvents: appState.customEvents,
         eventOverrides: appState.eventOverrides,
-        updatedAt: new Date().toISOString()
+        clientUpdatedAt: meta.setlist.clientUpdatedAt || Date.now(),
+        updatedAt: serverTimestamp()
       };
     }
 
+    // ---- 套用雲端資料到本機 ----
     function applyPrivateAttendancePayload(data) {
       if (!data || typeof data !== 'object') return;
       cloudBridge.isApplyingRemote = true;
@@ -369,14 +502,20 @@
         }
 
         persistState(false, 'attendance');
+
+        const meta = readSyncMeta();
+        meta.attendance = {
+          clientUpdatedAt: remoteClientTs(data),
+          profileId: String(cloudBridge.activeProfileId || '')
+        };
+        writeSyncMeta(meta);
+
         updateAttendedBadge();
         renderEvents();
         if (appState.activeTab === 'stats') {
           renderStats();
         }
-        cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-        cloudBridge.syncState = 'synced';
-        updateSyncUi();
+        markCloudSynced();
       } finally {
         cloudBridge.isApplyingRemote = false;
       }
@@ -397,37 +536,42 @@
         appState.eventOverrides = nextOverrides;
 
         persistState(false, 'setlist');
+
+        const meta = readSyncMeta();
+        meta.setlist.clientUpdatedAt = remoteClientTs(data);
+        writeSyncMeta(meta);
+
         renderFilters();
         renderEvents();
         if (appState.activeTab === 'stats') {
           renderStats();
         }
-        cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-        cloudBridge.syncState = 'synced';
-        updateSyncUi();
+        markCloudSynced();
       } finally {
         cloudBridge.isApplyingRemote = false;
       }
     }
 
+    // ---- 寫入雲端 ----
     async function pushPrivateAttendanceToCloud(notifyUser = false) {
       if (cloudBridge.isApplyingRemote) return;
       if (!cloudBridge.authUser || !cloudBridge.db || !cloudBridge.activeProfileId) return;
+
+      // 本機快取尚未與目前個人空間對齊時，不直接寫入，交給連線時的比對流程處理
+      const meta = readSyncMeta();
+      if (meta.attendance.profileId !== String(cloudBridge.activeProfileId)) return;
 
       const docRef = getPrivateUserDocRef(cloudBridge.activeProfileId);
       if (!docRef) return;
 
       try {
         await setDoc(docRef, serializePrivateAttendance(), { merge: true });
-        cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-        cloudBridge.syncState = 'synced';
-        updateSyncUi();
+        markCloudSynced();
         if (notifyUser) {
           showToast('已同步個人參戰與曲目紀錄');
         }
-      } catch (_err) {
-        cloudBridge.syncState = 'error';
-        updateSyncUi();
+      } catch (err) {
+        markCloudError(err, 'push attendance');
         if (notifyUser) {
           showToast('雲端同步失敗，已保留本機紀錄');
         }
@@ -437,24 +581,108 @@
     async function pushSharedSetlistsToCloud(notifyUser = false) {
       if (cloudBridge.isApplyingRemote) return;
       if (!cloudBridge.authUser || !cloudBridge.db) return;
+      // 只有管理模式才會寫入共用歌單，一般使用者的操作不會影響大家看到的內容
+      if (!appState.isAdmin) return;
 
       const docRef = getSharedSetlistDocRef();
       if (!docRef) return;
 
+      // Firestore 單一文件上限 1 MB，超過時不寫入並提醒
+      const approxSize = new Blob([JSON.stringify({
+        customEvents: appState.customEvents,
+        eventOverrides: appState.eventOverrides
+      })]).size;
+      if (approxSize > SHARED_DOC_SOFT_LIMIT) {
+        markCloudError(new Error('shared setlist too large: ' + approxSize), 'push shared');
+        showToast('共用歌單資料量過大（含圖片），無法同步到雲端，已保留本機修改');
+        return;
+      }
+
       try {
         await setDoc(docRef, serializeSharedSetlists(), { merge: true });
-        cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-        cloudBridge.syncState = 'synced';
-        updateSyncUi();
+        markCloudSynced();
         if (notifyUser) {
           showToast('已同步共用歌單更新');
         }
-      } catch (_err) {
-        cloudBridge.syncState = 'error';
-        updateSyncUi();
+      } catch (err) {
+        markCloudError(err, 'push shared');
         if (notifyUser) {
           showToast('共用歌單同步失敗，已保留本機修改');
         }
+      }
+    }
+
+    // ---- 連線時的新舊比對 ----
+    async function reconcileSharedSetlists(sharedRef, snap) {
+      const meta = readSyncMeta();
+      const localTs = meta.setlist.clientUpdatedAt;
+
+      if (!snap.exists()) {
+        if (appState.isAdmin && localSetlistHasData()) {
+          meta.setlist.clientUpdatedAt = localTs || Date.now();
+          writeSyncMeta(meta);
+          await setDoc(sharedRef, serializeSharedSetlists());
+        }
+        markCloudSynced();
+        return;
+      }
+
+      const data = snap.data();
+      const remoteTs = remoteClientTs(data);
+
+      if (remoteTs > localTs || (!appState.isAdmin && !sharedContentEquals(data))) {
+        if (localSetlistHasData() && !sharedContentEquals(data)) {
+          backupLocalBeforeCloudOverwrite('setlist');
+        }
+        applySharedSetlistPayload(data);
+      } else if (localTs > remoteTs && appState.isAdmin) {
+        await setDoc(sharedRef, serializeSharedSetlists(), { merge: true });
+        markCloudSynced();
+      } else {
+        markCloudSynced();
+      }
+    }
+
+    async function reconcileAttendance(docRef, snap, profileId) {
+      const meta = readSyncMeta();
+      const bound = meta.attendance.profileId === String(profileId);
+
+      if (!snap.exists()) {
+        // 雲端尚無此個人空間：以目前本機紀錄建立
+        meta.attendance = {
+          clientUpdatedAt: (bound && meta.attendance.clientUpdatedAt) || Date.now(),
+          profileId: String(profileId)
+        };
+        writeSyncMeta(meta);
+        await setDoc(docRef, serializePrivateAttendance());
+        markCloudSynced();
+        return;
+      }
+
+      const data = snap.data();
+      const remoteTs = remoteClientTs(data);
+      // 本機快取不是屬於這個個人空間時，視為沒有可信的本機時間戳，一律以雲端為準
+      const localTs = bound ? meta.attendance.clientUpdatedAt : 0;
+
+      if (remoteTs > localTs || (!bound && !attendanceEquals(data))) {
+        const hadLocal = localAttendanceHasData() && !attendanceEquals(data);
+        if (hadLocal) {
+          backupLocalBeforeCloudOverwrite('attendance');
+        }
+        applyPrivateAttendancePayload(data);
+        if (hadLocal && !bound) {
+          showToast('已套用雲端的參戰紀錄（本機原有紀錄已另外備份）');
+        }
+      } else if (localTs > remoteTs) {
+        // 本機較新（例如離線期間有修改）：寫回雲端
+        meta.attendance.profileId = String(profileId);
+        writeSyncMeta(meta);
+        await setDoc(docRef, serializePrivateAttendance(), { merge: true });
+        markCloudSynced();
+      } else {
+        meta.attendance.profileId = String(profileId);
+        writeSyncMeta(meta);
+        markCloudSynced();
       }
     }
 
@@ -470,41 +698,28 @@
 
       try {
         const snap = await getDoc(sharedRef);
-        if (snap.exists()) {
-          applySharedSetlistPayload(snap.data());
-        } else if (appState.customEvents.length > 0 || Object.keys(appState.eventOverrides).length > 0) {
-          await setDoc(sharedRef, serializeSharedSetlists(), { merge: true });
-        }
-      } catch (_err) {
-        cloudBridge.syncState = 'error';
-        updateSyncUi();
+        await reconcileSharedSetlists(sharedRef, snap);
+      } catch (err) {
+        markCloudError(err, 'shared reconcile');
       }
 
       cloudBridge.unsubscribeSharedDoc = onSnapshot(
         sharedRef,
         (snapshot) => {
           if (!snapshot.exists()) return;
+          if (snapshot.metadata && snapshot.metadata.hasPendingWrites) return;
           const remoteData = snapshot.data();
-          const serializedLocal = JSON.stringify({
-            customEvents: appState.customEvents,
-            eventOverrides: appState.eventOverrides
-          });
-          const serializedRemote = JSON.stringify({
-            customEvents: Array.isArray(remoteData.customEvents) ? remoteData.customEvents : [],
-            eventOverrides: (remoteData.eventOverrides && typeof remoteData.eventOverrides === 'object') ? remoteData.eventOverrides : {}
-          });
+          const meta = readSyncMeta();
+          const remoteTs = remoteClientTs(remoteData);
 
-          if (serializedLocal !== serializedRemote) {
+          if (remoteTs > meta.setlist.clientUpdatedAt || (!appState.isAdmin && !sharedContentEquals(remoteData))) {
             applySharedSetlistPayload(remoteData);
           } else {
-            cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-            cloudBridge.syncState = 'synced';
-            updateSyncUi();
+            markCloudSynced();
           }
         },
-        (_err) => {
-          cloudBridge.syncState = 'error';
-          updateSyncUi();
+        (err) => {
+          markCloudError(err, 'shared listener');
         }
       );
     }
@@ -527,51 +742,38 @@
 
       try {
         const snap = await getDoc(docRef);
-        if (snap.exists()) {
-          applyPrivateAttendancePayload(snap.data());
-        } else {
-          await setDoc(docRef, serializePrivateAttendance(), { merge: true });
-          cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-          cloudBridge.syncState = 'synced';
-          updateSyncUi();
-        }
-      } catch (_err) {
-        cloudBridge.syncState = 'error';
-        updateSyncUi();
+        await reconcileAttendance(docRef, snap, profileId);
+      } catch (err) {
+        markCloudError(err, 'profile reconcile');
       }
 
       cloudBridge.unsubscribePrivateDoc = onSnapshot(
         docRef,
         (snapshot) => {
           if (!snapshot.exists()) return;
+          if (snapshot.metadata && snapshot.metadata.hasPendingWrites) return;
+          const meta = readSyncMeta();
+          if (meta.attendance.profileId !== String(cloudBridge.activeProfileId)) return;
           const remoteData = snapshot.data();
-          const serializedLocal = JSON.stringify([...appState.attendedIds].sort());
-          const serializedRemote = JSON.stringify((Array.isArray(remoteData.attendedIds) ? remoteData.attendedIds.map(String) : []).sort());
+          const remoteTs = remoteClientTs(remoteData);
 
-          if (serializedLocal !== serializedRemote) {
+          if (remoteTs > meta.attendance.clientUpdatedAt) {
             applyPrivateAttendancePayload(remoteData);
           } else {
-            cloudBridge.lastSyncedAt = new Date().toLocaleTimeString('zh-Hant', { hour12: false });
-            cloudBridge.syncState = 'synced';
-            updateSyncUi();
+            markCloudSynced();
           }
         },
-        (_err) => {
-          cloudBridge.syncState = 'error';
-          updateSyncUi();
+        (err) => {
+          markCloudError(err, 'profile listener');
         }
       );
     }
 
     async function initCloudSync() {
-      if (typeof __firebase_config === 'undefined' || !__firebase_config) {
-        cloudBridge.syncState = 'offline';
-        updateSyncUi();
-        return;
-      }
-
       try {
-        const firebaseConfig = JSON.parse(__firebase_config);
+        const firebaseConfig = (typeof __firebase_config !== 'undefined' && __firebase_config)
+          ? JSON.parse(__firebase_config)
+          : FIREBASE_CONFIG;
         const app = initializeApp(firebaseConfig);
         cloudBridge.auth = getAuth(app);
         cloudBridge.db = getFirestore(app);
@@ -595,7 +797,8 @@
         } else {
           await signInAnonymously(cloudBridge.auth);
         }
-      } catch (_err) {
+      } catch (err) {
+        console.warn('[cloud] init failed', (err && (err.code || err.message)) || err);
         cloudBridge.syncState = 'offline';
         updateSyncUi();
       }
@@ -674,12 +877,18 @@
     };
 
     window.syncNowToCloud = async function (notifyUser = true) {
-      await Promise.all([
-        pushSharedSetlistsToCloud(false),
-        pushPrivateAttendanceToCloud(false)
-      ]);
+      if (!cloudBridge.authUser || !cloudBridge.db || !cloudBridge.activeProfileId) {
+        if (notifyUser) showToast('尚未連線到雲端，目前為本機模式');
+        return;
+      }
+      // 重新比對雲端與本機：雲端較新則套用，本機較新則寫回
+      cloudBridge.syncState = 'connecting';
+      updateSyncUi();
+      await subscribeToProfile(cloudBridge.activeProfileId);
       if (notifyUser) {
-        showToast('已完成共用歌單與個人參戰同步');
+        showToast(cloudBridge.syncState === 'synced'
+          ? '已完成共用歌單與個人參戰同步'
+          : '雲端同步失敗，已保留本機紀錄');
       }
     };
 
@@ -880,6 +1089,9 @@
       safeWriteStorage(STORAGE_KEY_OVERRIDES, appState.eventOverrides);
       safeWriteStorage(STORAGE_KEY_EXTRA_UNPLAYED, appState.extraUnplayedSongs);
       safeWriteStorage(STORAGE_KEY_HIDDEN_UNPLAYED, [...appState.hiddenUnplayedKeys]);
+      if (shouldSyncCloud) {
+        touchLocalMeta(syncScope);
+      }
       if (shouldSyncCloud && typeof window.__onLocalStateMutated === 'function') {
         window.__onLocalStateMutated(syncScope);
       }

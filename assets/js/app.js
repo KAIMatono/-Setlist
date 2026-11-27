@@ -2675,6 +2675,21 @@
         }
       ];
 
+      cards.forEach(c => {
+        drawRoundRect(ctx, c.x, c.y, 472, 162, 24, '#FFFFFF', '#FBCFE8', 2);
+        ctx.fillStyle = '#6B7280';
+        ctx.font = 'bold 23px "Noto Sans TC", sans-serif';
+        ctx.fillText(c.title, c.x + 28, c.y + 44);
+
+        ctx.fillStyle = c.isSong ? '#BE185D' : '#111827';
+        ctx.font = c.isSong ? 'bold 34px "Noto Sans TC", sans-serif' : 'bold 46px "Noto Sans TC", sans-serif';
+        drawTruncatedText(ctx, c.value, c.x + 28, c.y + 102, 416);
+
+        ctx.fillStyle = '#9CA3AF';
+        ctx.font = '21px "Noto Sans TC", sans-serif';
+        drawTruncatedText(ctx, c.sub, c.x + 28, c.y + 140, 416);
+      });
+        
       const yearCardX = 56;
       const yearCardW = 968;
       const yearCardTop = 582;

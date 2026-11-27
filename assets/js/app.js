@@ -2543,6 +2543,294 @@
       showToast('已重設所有參戰與自訂紀錄');
     }
 
+    // ---- 分享參戰履歷圖（Canvas 繪圖與預覽互動） ----
+    let currentReportDataUrl = '';
+    let currentReportBlob = null;
+    let nicknameRedrawTimer = null;
+    const NICKNAME_STORAGE_KEY = 'sakurazaka_report_nickname';
+
+    function getSavedNickname() {
+      return (safeReadStorage(NICKNAME_STORAGE_KEY, '') || '').trim();
+    }
+
+    function saveNickname(val) {
+      const trimmed = (val || '').trim();
+      safeWriteStorage(NICKNAME_STORAGE_KEY, trimmed);
+    }
+
+    function onNicknameInputChange(val) {
+      saveNickname(val);
+      clearTimeout(nicknameRedrawTimer);
+      nicknameRedrawTimer = setTimeout(async () => {
+        const dataUrl = await generateShareReportCanvas();
+        const imgEl = document.getElementById('share-report-preview-img');
+        if (imgEl) imgEl.src = dataUrl;
+      }, 180);
+    }
+
+    function drawRoundRect(ctx, x, y, w, h, r, fillStyle, strokeStyle = null, lineWidth = 2) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+      if (fillStyle) {
+        ctx.fillStyle = fillStyle;
+        ctx.fill();
+      }
+      if (strokeStyle) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+      }
+    }
+
+    function drawTruncatedText(ctx, text, x, y, maxWidth) {
+      let display = String(text || '');
+      if (ctx.measureText(display).width > maxWidth) {
+        while (display.length > 1 && ctx.measureText(display + '…').width > maxWidth) {
+          display = display.slice(0, -1);
+        }
+        display += '…';
+      }
+      ctx.fillText(display, x, y);
+    }
+
+    async function generateShareReportCanvas() {
+      const data = window.getUserReportStats();
+      const canvas = document.createElement('canvas');
+      canvas.width = 1080;
+      canvas.height = 1350;
+      const ctx = canvas.getContext('2d');
+
+      const bgGrad = ctx.createLinearGradient(0, 0, 1080, 1350);
+      bgGrad.addColorStop(0, '#FFF5F8');
+      bgGrad.addColorStop(0.5, '#FCE7EF');
+      bgGrad.addColorStop(1, '#F8D7E4');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, 1080, 1350);
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(236, 72, 153, 0.06)';
+      ctx.beginPath();
+      ctx.moveTo(780, 0);
+      ctx.lineTo(1080, 0);
+      ctx.lineTo(1080, 420);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      drawRoundRect(ctx, 56, 52, 968, 138, 28, '#FFFFFF', '#FBCFE8', 2);
+      ctx.fillStyle = '#EC4899';
+      ctx.beginPath();
+      ctx.moveTo(96, 148);
+      ctx.lineTo(148, 148);
+      ctx.lineTo(148, 94);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = '#1F2937';
+      ctx.font = 'bold 38px "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.fillText('櫻坂46 歷年參戰履歷', 172, 114);
+
+      ctx.fillStyle = '#6B7280';
+      ctx.font = '24px "Noto Sans TC", sans-serif';
+      ctx.fillText('2020–2026 逐日公演・音樂祭現場統計', 172, 154);
+
+      if (data.badgeText) {
+        drawRoundRect(ctx, 716, 88, 276, 64, 32, '#FDF2F8', '#F9A8D4', 2);
+        ctx.fillStyle = '#BE185D';
+        ctx.font = 'bold 24px "Noto Sans TC", sans-serif';
+        ctx.textAlign = 'center';
+        drawTruncatedText(ctx, data.badgeText, 854, 128, 244);
+        ctx.textAlign = 'left';
+      }
+
+      const cards = [
+        {
+          title: '已參戰場次',
+          value: `${data.totalLives} 場`,
+          sub: data.liveDetail,
+          x: 56, y: 214
+        },
+        {
+          title: '現場聽過總曲次',
+          value: `${data.totalSongs} 次`,
+          sub: '含安可累計演出曲數',
+          x: 552, y: 214
+        },
+        {
+          title: '解鎖不重複曲目',
+          value: `${data.unlockedCount} / ${data.totalCatalog} 首`,
+          sub: `全曲庫解鎖比例 ${data.unlockRate}`,
+          x: 56, y: 396
+        },
+        {
+          title: '最常聽到第一名',
+          value: data.topSongName,
+          sub: data.topSongSub,
+          x: 552, y: 396,
+          isSong: true
+        }
+      ];
+
+      cards.forEach(c => {
+        drawRoundRect(ctx, c.x, c.y, 472, 162, 24, '#FFFFFF', '#FBCFE8', 2);
+        ctx.fillStyle = '#6B7280';
+        ctx.font = 'bold 23px "Noto Sans TC", sans-serif';
+        ctx.fillText(c.title, c.x + 28, c.y + 44);
+
+        ctx.fillStyle = c.isSong ? '#BE185D' : '#111827';
+        ctx.font = c.isSong ? 'bold 34px "Noto Sans TC", sans-serif' : 'bold 46px "Noto Sans TC", sans-serif';
+        drawTruncatedText(ctx, c.value, c.x + 28, c.y + 102, 416);
+
+        ctx.fillStyle = '#9CA3AF';
+        ctx.font = '21px "Noto Sans TC", sans-serif';
+        drawTruncatedText(ctx, c.sub, c.x + 28, c.y + 140, 416);
+      });
+
+      drawRoundRect(ctx, 56, 582, 968, 326, 26, '#FFFFFF', '#FBCFE8', 2);
+      ctx.fillStyle = '#1F2937';
+      ctx.font = 'bold 28px "Noto Sans TC", sans-serif';
+      ctx.fillText('年度參戰分布（2020–2026）', 88, 632);
+
+      const maxYearCount = Math.max(...data.yearCounts.map(d => d.count), 1);
+      data.yearCounts.forEach((item, idx) => {
+        const rowY = 674 + idx * 32;
+        ctx.fillStyle = '#374151';
+        ctx.font = 'bold 22px "Noto Sans TC", sans-serif';
+        ctx.fillText(item.year, 88, rowY + 16);
+
+        const barX = 172;
+        const barMaxW = 730;
+        drawRoundRect(ctx, barX, rowY, barMaxW, 20, 10, '#FCE7F3');
+
+        if (item.count > 0) {
+          const fillW = Math.max(24, (item.count / maxYearCount) * barMaxW);
+          const barGrad = ctx.createLinearGradient(barX, 0, barX + fillW, 0);
+          barGrad.addColorStop(0, '#F472B6');
+          barGrad.addColorStop(1, '#DB2777');
+          drawRoundRect(ctx, barX, rowY, fillW, 20, 10, barGrad);
+        }
+
+        ctx.fillStyle = item.count > 0 ? '#BE185D' : '#9CA3AF';
+        ctx.font = 'bold 22px "Noto Sans TC", sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${item.count} 場`, 992, rowY + 16);
+        ctx.textAlign = 'left';
+      });
+
+      drawRoundRect(ctx, 56, 932, 968, 336, 26, '#FFFFFF', '#FBCFE8', 2);
+      ctx.fillStyle = '#1F2937';
+      ctx.font = 'bold 28px "Noto Sans TC", sans-serif';
+      ctx.fillText('現場出現比例前五名（Top 5）', 88, 982);
+
+      if (!data.top5 || data.top5.length === 0) {
+        ctx.fillStyle = '#9CA3AF';
+        ctx.font = '24px "Noto Sans TC", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('尚未加入參戰場次，加入後即可解鎖專屬 Top 5 榜單！', 540, 1120);
+        ctx.textAlign = 'left';
+      } else {
+        data.top5.forEach((song, idx) => {
+          const itemY = 1024 + idx * 46;
+          const badgeColors = ['#DB2777', '#EC4899', '#F472B6', '#F9A8D4', '#F9A8D4'];
+          drawRoundRect(ctx, 88, itemY - 24, 36, 32, 10, badgeColors[idx]);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = 'bold 20px "Noto Sans TC", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${idx + 1}`, 106, itemY - 1);
+          ctx.textAlign = 'left';
+
+          ctx.fillStyle = '#1F2937';
+          ctx.font = 'bold 24px "Noto Sans TC", sans-serif';
+          drawTruncatedText(ctx, song.title, 140, itemY, 610);
+
+          ctx.fillStyle = '#BE185D';
+          ctx.font = 'bold 22px "Noto Sans TC", sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText(song.metric, 992, itemY);
+          ctx.textAlign = 'left';
+        });
+      }
+
+      ctx.fillStyle = '#9D174D';
+      ctx.font = '20px "Noto Sans TC", sans-serif';
+      ctx.textAlign = 'center';
+      const todayStr = new Date().toISOString().slice(0, 10);
+      ctx.fillText(`櫻坂46 歷年歌單與參戰統計 ・ Generated on ${todayStr}`, 540, 1312);
+      ctx.textAlign = 'left';
+
+      currentReportDataUrl = canvas.toDataURL('image/png');
+      return new Promise(resolve => {
+        canvas.toBlob(blob => {
+          currentReportBlob = blob;
+          resolve(currentReportDataUrl);
+        }, 'image/png');
+      });
+    }
+
+    async function openShareReportModal() {
+      const nicknameInput = document.getElementById('report-nickname-input');
+      if (nicknameInput) {
+        nicknameInput.value = getSavedNickname();
+      }
+
+      const dataUrl = await generateShareReportCanvas();
+      const imgEl = document.getElementById('share-report-preview-img');
+      if (imgEl) imgEl.src = dataUrl;
+
+      const shareBtn = document.getElementById('native-share-btn');
+      if (shareBtn && (!navigator.canShare || !currentReportBlob)) {
+        shareBtn.style.display = 'none';
+      } else if (shareBtn) {
+        shareBtn.style.display = 'block';
+      }
+
+      const modal = document.getElementById('share-report-modal');
+      if (modal) {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+      }
+    }
+
+    function closeShareReportModal() {
+      const modal = document.getElementById('share-report-modal');
+      if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+      }
+    }
+
+    function downloadShareReportImage() {
+      if (!currentReportDataUrl) return;
+      const link = document.createElement('a');
+      const dateTag = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      link.download = `sakurazaka46-live-report-${dateTag}.png`;
+      link.href = currentReportDataUrl;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    async function nativeShareReportImage() {
+      if (!currentReportBlob || !navigator.share) return;
+      const file = new File([currentReportBlob], 'sakurazaka46-live-report.png', { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            title: '我的櫻坂46 歷年參戰履歷',
+            text: '來看看我的櫻坂46 現場參戰統計！',
+            files: [file]
+          });
+        } catch (_err) {
+          // 使用者取消分享時忽略錯誤
+        }
+      }
+    }
+
     Object.assign(window, {
       switchTab,
       selectYear,
@@ -2580,7 +2868,13 @@
       handleAdminBackdropClick,
       submitAdminUnlock,
       exitAdminMode,
-      exportStandaloneHtml
+      exportStandaloneHtml,
+      getSavedNickname,
+      onNicknameInputChange,
+      openShareReportModal,
+      closeShareReportModal,
+      downloadShareReportImage,
+      nativeShareReportImage
     });
 
     document.addEventListener('DOMContentLoaded', function () {

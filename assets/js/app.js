@@ -37,6 +37,7 @@
     const COL_PROFILES = 'user_profiles';
     const COL_SHARED = 'shared_setlists';
     const STORAGE_KEY_SYNC_META = 'sakurazaka46_setlist_sync_meta_v1';
+    const STORAGE_KEY_CLOUD_OPTIN = 'sakurazaka46_setlist_cloud_optin_v1';
     const STORAGE_KEY_CLOUD_BACKUP = 'sakurazaka46_setlist_backup_before_cloud_v1';
     const SHARED_DOC_SOFT_LIMIT = 900 * 1024;
 
@@ -311,7 +312,8 @@
       const idEl = document.getElementById('modal-full-userid');
       const summaryEl = document.getElementById('stats-sync-summary');
 
-      const effectiveId = cloudBridge.activeProfileId || cloudBridge.authUser?.uid || '尚未連線';
+      const optedIn = isCloudOptedIn();
+      const effectiveId = cloudBridge.activeProfileId || (optedIn ? '尚未連線' : '尚未啟用雲端同步');
 
       if (idEl) {
         idEl.textContent = effectiveId;
@@ -331,14 +333,16 @@
         } else {
           dot.className = 'w-2 h-2 rounded-full bg-rose-400';
           label.textContent = '本機模式';
-          badge.textContent = '本機暫存（離線/未設定）';
+          badge.textContent = optedIn ? '本機暫存（離線/未設定）' : '本機模式（未啟用雲端同步）';
           badge.className = 'px-2.5 py-0.5 rounded-full text-xs font-black bg-rose-50 text-[#C96A88] border border-[#F6DCE4]';
         }
       }
 
       if (summaryEl) {
         const timeText = cloudBridge.lastSyncedAt ? `（上次同步：${cloudBridge.lastSyncedAt}）` : '';
-        summaryEl.textContent = `個人帳號 ID：${effectiveId} ${timeText}。歌單與新增場次會同步給大家；參戰紀錄僅限你的個人帳號跨裝置同步。`;
+        summaryEl.textContent = (!optedIn && !cloudBridge.activeProfileId)
+          ? '目前為本機模式：紀錄只存在這台裝置。想跨裝置同步，請點上方「本機模式」，輸入你自己的同步 ID 後啟用。'
+          : `同步 ID：${effectiveId} ${timeText}。歌單與新增場次會同步給大家；參戰紀錄僅限你的同步 ID 跨裝置同步。`;
       }
     }
 
@@ -580,9 +584,12 @@
 
     async function pushSharedSetlistsToCloud(notifyUser = false) {
       if (cloudBridge.isApplyingRemote) return;
-      if (!cloudBridge.authUser || !cloudBridge.db) return;
       // 只有管理模式才會寫入共用歌單，一般使用者的操作不會影響大家看到的內容
       if (!appState.isAdmin) return;
+      if (!cloudBridge.authUser || !cloudBridge.db) {
+        showToast('目前是本機模式，修改只存在這台裝置；啟用雲端同步後才會分享給大家');
+        return;
+      }
 
       const docRef = getSharedSetlistDocRef();
       if (!docRef) return;
@@ -769,46 +776,163 @@
       );
     }
 
-    async function initCloudSync() {
+    // ---- 雲端同步改為「使用者主動啟用」----
+    // 一般訪客預設只用本機，不會連線 Firebase、不會建立匿名帳號，也不會在資料庫產生任何文件。
+    // 使用者要同步時，在「個人帳號與跨裝置同步」輸入自己的同步 ID 並確認，才會啟用。
+    function isCloudOptedIn() {
+      const flag = safeReadStorage(STORAGE_KEY_CLOUD_OPTIN, null);
+      if (flag === true) return true;
+      if (flag === false) return false; // 使用者明確停用過
+      // 舊版曾自動綁定、且這台裝置有實際紀錄者，沿用原本設定，避免中斷既有同步
+      const meta = readSyncMeta();
+      return !!meta.attendance.profileId && (appState.attendedIds.size > 0 || appState.isAdmin);
+    }
+
+    function getSavedProfileId() {
+      const alias = String(safeReadStorage(STORAGE_KEY_PROFILE_ALIAS, '') || '').trim();
+      return alias || readSyncMeta().attendance.profileId || '';
+    }
+
+    function validateProfileId(raw) {
+      const id = String(raw || '').trim().replace(/[\/#?\[\]\\\s]+/g, '_');
+      if (id.length < 6) {
+        return { ok: false, msg: '同步 ID 至少需要 6 個字元，建議用不易被猜到的組合' };
+      }
+      if (id.length > 80) {
+        return { ok: false, msg: '同步 ID 最長 80 個字元' };
+      }
+      if (/^\.+$/.test(id) || /^__.*__$/.test(id)) {
+        return { ok: false, msg: '這個 ID 格式不可使用，請換一個' };
+      }
+      return { ok: true, id };
+    }
+
+    // 初始化 Firebase 並匿名登入（只在使用者啟用同步後才會呼叫）
+    async function ensureCloudReady() {
+      if (cloudBridge.db && cloudBridge.authUser) return true;
       try {
         const firebaseConfig = (typeof __firebase_config !== 'undefined' && __firebase_config)
           ? JSON.parse(__firebase_config)
           : FIREBASE_CONFIG;
-        const app = initializeApp(firebaseConfig);
-        cloudBridge.auth = getAuth(app);
-        cloudBridge.db = getFirestore(app);
-
-        onAuthStateChanged(cloudBridge.auth, async (user) => {
-          cloudBridge.authUser = user;
-          if (!user) {
-            cloudBridge.syncState = 'offline';
-            updateSyncUi();
-            return;
-          }
-          const savedAlias = safeReadStorage(STORAGE_KEY_PROFILE_ALIAS, '');
-          const targetProfileId = savedAlias && String(savedAlias).trim()
-            ? String(savedAlias).trim()
-            : user.uid;
-          await subscribeToProfile(targetProfileId);
-        });
-
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(cloudBridge.auth);
+        if (!cloudBridge.db) {
+          const app = initializeApp(firebaseConfig);
+          cloudBridge.auth = getAuth(app);
+          cloudBridge.db = getFirestore(app);
         }
+        if (!cloudBridge.authUser) {
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            const cred = await signInWithCustomToken(cloudBridge.auth, __initial_auth_token);
+            cloudBridge.authUser = cred.user;
+          } else {
+            const cred = await signInAnonymously(cloudBridge.auth);
+            cloudBridge.authUser = cred.user;
+          }
+        }
+        return !!cloudBridge.authUser;
       } catch (err) {
         console.warn('[cloud] init failed', (err && (err.code || err.message)) || err);
         cloudBridge.syncState = 'offline';
         updateSyncUi();
+        return false;
       }
+    }
+
+    // 載入網頁時呼叫：未啟用同步就維持本機模式
+    async function initCloudSync() {
+      if (!isCloudOptedIn()) {
+        cloudBridge.syncState = 'offline';
+        updateSyncUi();
+        return;
+      }
+      const profileId = getSavedProfileId();
+      if (!profileId) {
+        cloudBridge.syncState = 'offline';
+        updateSyncUi();
+        return;
+      }
+      cloudBridge.syncState = 'connecting';
+      updateSyncUi();
+      if (!(await ensureCloudReady())) return;
+      await subscribeToProfile(profileId);
+    }
+
+    async function connectToCloudProfile(profileId) {
+      const prevState = cloudBridge.syncState;
+      cloudBridge.syncState = 'connecting';
+      updateSyncUi();
+
+      if (!(await ensureCloudReady())) {
+        showToast('無法連線到雲端，仍使用本機模式');
+        cloudBridge.syncState = 'offline';
+        updateSyncUi();
+        return false;
+      }
+
+      const alreadyMine = readSyncMeta().attendance.profileId === String(profileId);
+      if (!alreadyMine) {
+        // 先確認這個 ID 在雲端是否已有資料，避免不小心連到別人的空間或覆蓋自己的紀錄
+        try {
+          const snap = await getDoc(getPrivateUserDocRef(profileId));
+          let agreed;
+          if (snap.exists()) {
+            const data = snap.data() || {};
+            const n = Array.isArray(data.attendedIds) ? data.attendedIds.length : 0;
+            agreed = window.confirm(
+              `這個 ID 在雲端已有資料（${n} 場參戰紀錄）。\n連結後會以雲端紀錄為準，這台裝置目前的紀錄會另外備份。\n\n確定要連結嗎？`
+            );
+          } else {
+            agreed = window.confirm(
+              '雲端目前沒有這個 ID 的資料。\n要用這個 ID 建立新的雲端空間，並上傳這台裝置目前的紀錄嗎？\n\n提醒：知道這個 ID 的人都能讀寫這份紀錄，請不要使用容易被猜到的 ID。'
+            );
+          }
+          if (!agreed) {
+            cloudBridge.syncState = prevState === 'synced' ? 'synced' : 'offline';
+            updateSyncUi();
+            return false;
+          }
+        } catch (err) {
+          markCloudError(err, 'check profile');
+          showToast('無法檢查雲端資料，請稍後再試（可按 F12 查看 [cloud] 訊息）');
+          return false;
+        }
+      }
+
+      safeWriteStorage(STORAGE_KEY_PROFILE_ALIAS, profileId);
+      safeWriteStorage(STORAGE_KEY_CLOUD_OPTIN, true);
+      await subscribeToProfile(profileId);
+      window.closeAccountModal();
+      showToast(cloudBridge.syncState === 'synced'
+        ? `已連結並同步：${profileId}`
+        : '雲端同步失敗，已保留本機紀錄');
+      return cloudBridge.syncState === 'synced';
     }
 
     window.openAccountModal = function () {
       const modal = document.getElementById('account-modal');
       const input = document.getElementById('cross-device-id-input');
+      const optedIn = isCloudOptedIn();
       if (input) {
         input.value = cloudBridge.activeProfileId || '';
+        input.placeholder = '輸入你自己的同步 ID（至少 6 個字元，例如：sakura-kai-2026）';
+      }
+      if (modal) {
+        const submitBtn = modal.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.textContent = optedIn ? '切換並同步' : '啟用並同步';
+        const randomBtn = modal.querySelector('[onclick*="createNewAnonymousProfile"]');
+        if (randomBtn) randomBtn.textContent = '幫我產生一組隨機 ID';
+
+        let disableBtn = document.getElementById('disable-cloud-sync-btn');
+        const form = modal.querySelector('form');
+        if (!disableBtn && form && form.parentNode) {
+          disableBtn = document.createElement('button');
+          disableBtn.type = 'button';
+          disableBtn.id = 'disable-cloud-sync-btn';
+          disableBtn.className = 'w-full px-3 py-2 rounded-xl bg-white hover:bg-rose-50 text-[#C96A88] text-xs font-bold border border-[#F6DCE4] cursor-pointer';
+          disableBtn.textContent = '停止雲端同步（改回只用本機）';
+          disableBtn.onclick = () => window.disableCloudSync();
+          form.parentNode.appendChild(disableBtn);
+        }
+        if (disableBtn) disableBtn.style.display = optedIn ? '' : 'none';
       }
       updateSyncUi();
       if (modal) {
@@ -832,9 +956,9 @@
     };
 
     window.copyCurrentUserId = function () {
-      const idText = cloudBridge.activeProfileId || cloudBridge.authUser?.uid || '';
+      const idText = cloudBridge.activeProfileId || '';
       if (!idText) {
-        showToast('目前尚無可用帳號 ID');
+        showToast('尚未啟用雲端同步，沒有可複製的同步 ID');
         return;
       }
       const tempInput = document.createElement('textarea');
@@ -843,7 +967,7 @@
       tempInput.select();
       try {
         document.execCommand('copy');
-        showToast('已複製完整帳號 ID');
+        showToast('已複製同步 ID');
       } catch (_err) {
         showToast('複製失敗，請手動選取複製');
       } finally {
@@ -852,28 +976,65 @@
     };
 
     window.switchCrossDeviceProfile = async function (e) {
-      e.preventDefault();
+      if (e && e.preventDefault) e.preventDefault();
       const input = document.getElementById('cross-device-id-input');
-      const nextId = String(input?.value || '').trim().replace(/[\/#?\[\]]/g, '_');
-      if (!nextId) {
-        showToast('請輸入有效的帳號 ID 或個人空間代碼');
+      const v = validateProfileId(input ? input.value : '');
+      if (!v.ok) {
+        showToast(v.msg);
         return;
       }
-      safeWriteStorage(STORAGE_KEY_PROFILE_ALIAS, nextId);
-      cloudBridge.syncState = 'connecting';
-      await subscribeToProfile(nextId);
-      window.closeAccountModal();
-      showToast(`已切換至個人空間：${nextId}`);
+      await connectToCloudProfile(v.id);
     };
 
     window.createNewAnonymousProfile = async function () {
       const freshId = `buddy-${crypto.randomUUID()}`;
-      safeWriteStorage(STORAGE_KEY_PROFILE_ALIAS, freshId);
       const input = document.getElementById('cross-device-id-input');
       if (input) input.value = freshId;
-      cloudBridge.syncState = 'connecting';
-      await subscribeToProfile(freshId);
-      showToast('已建立新的獨立帳號 ID');
+      await connectToCloudProfile(freshId);
+    };
+
+    window.disableCloudSync = function () {
+      if (!window.confirm('要停止雲端同步嗎？\n資料會保留在這台裝置，之後可以再輸入同步 ID 重新啟用。')) return;
+      if (cloudBridge.unsubscribePrivateDoc) {
+        cloudBridge.unsubscribePrivateDoc();
+        cloudBridge.unsubscribePrivateDoc = null;
+      }
+      if (cloudBridge.unsubscribeSharedDoc) {
+        cloudBridge.unsubscribeSharedDoc();
+        cloudBridge.unsubscribeSharedDoc = null;
+      }
+      safeWriteStorage(STORAGE_KEY_CLOUD_OPTIN, false);
+      cloudBridge.authUser = null;
+      cloudBridge.activeProfileId = null;
+      cloudBridge.syncState = 'offline';
+      updateSyncUi();
+      window.closeAccountModal();
+      showToast('已停止雲端同步，資料仍保留在這台裝置');
+    };
+
+    // ---- 分享參戰履歷：直接用統計資料產生，不再從畫面文字解析 ----
+    // 覆蓋 index.html 內 getUserReportStats()（原本靠 document.body.innerText 解析，
+    // 統計頁沒顯示或排版改變時會抓不到 Top 5）。
+    window.getUserReportStats = function () {
+      const stats = computeAttendanceStats();
+      const nickname = (typeof window.getSavedNickname === 'function') ? window.getSavedNickname() : '';
+      const top = stats.rankedSongs[0];
+      return {
+        badgeText: nickname ? ` ${nickname}` : '',
+        totalLives: stats.attendedCount,
+        liveDetail: `單獨 ${stats.soloCount} / 音樂祭 ${stats.festivalCount}`,
+        totalSongs: stats.totalPlays,
+        unlockedCount: stats.uniqueHeard,
+        totalCatalog: stats.totalCatalog,
+        unlockRate: `${stats.completionPct}%`,
+        topSongName: top ? top.title : '尚未加入參戰場次',
+        topSongSub: top ? `${top.count} 次（參戰場次出現率 ${top.ratioPct}%）` : '—',
+        yearCounts: Object.keys(stats.yearlyCounts).map(y => ({ year: y, count: stats.yearlyCounts[y] })),
+        top5: stats.rankedSongs.slice(0, 5).map(s => ({
+          title: s.title,
+          metric: `${s.count} 次 · ${s.ratioPct}%`
+        }))
+      };
     };
 
     window.syncNowToCloud = async function (notifyUser = true) {

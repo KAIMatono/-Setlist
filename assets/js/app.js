@@ -1012,7 +1012,7 @@
       showToast('已停止雲端同步，資料仍保留在這台裝置');
     };
 
-    // ---- 分享參戰履歷：直接用統計資料產生，不再從畫面文字解析 ----
+    // ---- 分享參戰：直接用統計資料產生，不再從畫面文字解析 ----
     // 覆蓋 index.html 內 getUserReportStats()（原本靠 document.body.innerText 解析，
     // 統計頁沒顯示或排版改變時會抓不到 Top 5）。
     window.getUserReportStats = function () {
@@ -2543,7 +2543,7 @@
       showToast('已重設所有參戰與自訂紀錄');
     }
 
-    // ---- 分享參戰履歷圖（Canvas 繪圖與預覽互動） ----
+    // ---- 分享參戰圖（Canvas 繪圖與預覽互動） ----
     let currentReportDataUrl = '';
     let currentReportBlob = null;
     let nicknameRedrawTimer = null;
@@ -2760,7 +2760,6 @@
       ctx.textAlign = 'center';
       const todayStr = new Date().toISOString().slice(0, 10);
       ctx.fillText(`櫻坂46 歷年歌單與參戰統計 ・ Generated on ${todayStr}`, 540, 1312);
-      ctx.textAlign = 'left';
 
       currentReportDataUrl = canvas.toDataURL('image/png');
       return new Promise(resolve => {

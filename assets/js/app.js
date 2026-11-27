@@ -2637,7 +2637,6 @@
 
       ctx.fillStyle = '#6B7280';
       ctx.font = '24px "Noto Sans TC", sans-serif';
-      ctx.fillText('2020–2026 逐日公演・音樂祭現場統計', 172, 154);
 
       if (data.badgeText) {
         drawRoundRect(ctx, 716, 88, 276, 64, 32, '#FDF2F8', '#F9A8D4', 2);

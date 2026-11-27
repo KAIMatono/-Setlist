@@ -65,7 +65,7 @@
         const urlCatalog = String(params.get('catalog') || '').trim().replace(/[\/#?\[\]]/g, '_');
         const urlAdmin = String(params.get('admin') || '').trim();
 
-        if (['2020', '2021', '2022', '2023', '2024', '2025', '2026'].includes(urlYear)) {
+        if (/^20\d{2}$/.test(urlYear)) {
           appState.year = urlYear;
         }
         if (['solo', 'festival'].includes(urlCategory)) {
@@ -1456,8 +1456,18 @@
       if (badge) badge.textContent = String(appState.attendedIds.size);
     }
 
+    // 年份清單：至少涵蓋 2020–2026，並自動納入資料裡出現的更新年份（例如 2027），之後新增年份不用再改程式
+    function getKnownYears() {
+      const years = new Set(['2020', '2021', '2022', '2023', '2024', '2025', '2026']);
+      for (const ev of getAllEvents()) {
+        const y = String((ev && ev.year) || '').trim();
+        if (/^20\d{2}$/.test(y)) years.add(y);
+      }
+      return [...years].sort();
+    }
+
     function renderFilters() {
-      const years = ['ALL', '2020', '2021', '2022', '2023', '2024', '2025', '2026'];
+      const years = ['ALL', ...getKnownYears()];
       const yearPills = document.getElementById('year-pills');
       if (yearPills) {
         yearPills.innerHTML = years.map(y => {
@@ -1840,7 +1850,7 @@
       });
 
       const yearlyCounts = {};
-      for (const y of ['2020', '2021', '2022', '2023', '2024', '2025', '2026']) {
+      for (const y of getKnownYears()) {
         yearlyCounts[y] = 0;
       }
       for (const ev of attendedEvents) {
@@ -2600,17 +2610,19 @@
 
     async function generateShareReportCanvas() {
       const data = window.getUserReportStats();
+      const reportExtraRows = Math.max(0, ((data.yearCounts && data.yearCounts.length) || 7) - 7);
+      const reportHeight = 1350 + reportExtraRows * 32;
       const canvas = document.createElement('canvas');
       canvas.width = 1080;
-      canvas.height = 1350;
+      canvas.height = reportHeight;
       const ctx = canvas.getContext('2d');
 
-      const bgGrad = ctx.createLinearGradient(0, 0, 1080, 1350);
+      const bgGrad = ctx.createLinearGradient(0, 0, 1080, reportHeight);
       bgGrad.addColorStop(0, '#FFF5F8');
       bgGrad.addColorStop(0.5, '#FCE7EF');
       bgGrad.addColorStop(1, '#F8D7E4');
       ctx.fillStyle = bgGrad;
-      ctx.fillRect(0, 0, 1080, 1350);
+      ctx.fillRect(0, 0, 1080, reportHeight);
 
       ctx.save();
       ctx.fillStyle = 'rgba(236, 72, 153, 0.06)';

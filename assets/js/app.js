@@ -913,7 +913,7 @@
       const optedIn = isCloudOptedIn();
       if (input) {
         input.value = cloudBridge.activeProfileId || '';
-        input.placeholder = '輸入你自己的同步 ID（至少 6 個字元，例如：sakura-kai-2026）';
+        input.placeholder = '輸入你自己的同步 ID（至少 6 個字元，例如：sakurazaka-setlist）';
       }
       if (modal) {
         const submitBtn = modal.querySelector('button[type="submit"]');
@@ -2693,7 +2693,7 @@
       drawRoundRect(ctx, 56, 582, 968, 326, 26, '#FFFFFF', '#FBCFE8', 2);
       ctx.fillStyle = '#1F2937';
       ctx.font = 'bold 28px "Noto Sans TC", sans-serif';
-      ctx.fillText('年度參戰分布（2020–2026）', 88, 632);
+      ctx.fillText('年度參戰分布', 88, 632);
 
       const maxYearCount = Math.max(...data.yearCounts.map(d => d.count), 1);
       data.yearCounts.forEach((item, idx) => {

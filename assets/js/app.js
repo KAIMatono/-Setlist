@@ -2675,43 +2675,49 @@
         }
       ];
 
-      cards.forEach(c => {
-        drawRoundRect(ctx, c.x, c.y, 472, 162, 24, '#FFFFFF', '#FBCFE8', 2);
-        ctx.fillStyle = '#6B7280';
-        ctx.font = 'bold 23px "Noto Sans TC", sans-serif';
-        ctx.fillText(c.title, c.x + 28, c.y + 44);
+      const yearCardX = 56;
+      const yearCardW = 968;
+      const yearCardTop = 582;
+      const yearTitleY = yearCardTop + 50; // 632
+      const listStartY = yearCardTop + 92; // 674
+      const rowStep = 32;
+      const barHeight = 20;
+      const yearCardBottomPad = 24;
 
-        ctx.fillStyle = c.isSong ? '#BE185D' : '#111827';
-        ctx.font = c.isSong ? 'bold 34px "Noto Sans TC", sans-serif' : 'bold 46px "Noto Sans TC", sans-serif';
-        drawTruncatedText(ctx, c.value, c.x + 28, c.y + 102, 416);
+      const yearCount = data.yearCounts.length;
+      const rowsEndY = listStartY + Math.max(yearCount - 1, 0) * rowStep + barHeight;
+      const yearCardHeight = Math.max(326, rowsEndY + yearCardBottomPad - yearCardTop);
+      const yearCardBottom = yearCardTop + yearCardHeight;
 
-        ctx.fillStyle = '#9CA3AF';
-        ctx.font = '21px "Noto Sans TC", sans-serif';
-        drawTruncatedText(ctx, c.sub, c.x + 28, c.y + 140, 416);
-      });
+      const years = data.yearCounts.map(d => d.year);
+      const yearRangeLabel = years.length > 1
+        ? `（${years[0]}–${years[years.length - 1]}）`
+        : years.length === 1
+          ? `（${years[0]}）`
+          : '';
 
-      drawRoundRect(ctx, 56, 582, 968, 326, 26, '#FFFFFF', '#FBCFE8', 2);
+      drawRoundRect(ctx, yearCardX, yearCardTop, yearCardW, yearCardHeight, 26, '#FFFFFF', '#FBCFE8', 2);
       ctx.fillStyle = '#1F2937';
       ctx.font = 'bold 28px "Noto Sans TC", sans-serif';
-      ctx.fillText('年度參戰分布', 88, 632);
+      ctx.fillText(`年度參戰分布${yearRangeLabel}`, 88, yearTitleY);
 
       const maxYearCount = Math.max(...data.yearCounts.map(d => d.count), 1);
       data.yearCounts.forEach((item, idx) => {
-        const rowY = 674 + idx * 32;
+        const rowY = listStartY + idx * rowStep;
         ctx.fillStyle = '#374151';
         ctx.font = 'bold 22px "Noto Sans TC", sans-serif';
         ctx.fillText(item.year, 88, rowY + 16);
 
         const barX = 172;
         const barMaxW = 730;
-        drawRoundRect(ctx, barX, rowY, barMaxW, 20, 10, '#FCE7F3');
+        drawRoundRect(ctx, barX, rowY, barMaxW, barHeight, 10, '#FCE7F3');
 
         if (item.count > 0) {
           const fillW = Math.max(24, (item.count / maxYearCount) * barMaxW);
           const barGrad = ctx.createLinearGradient(barX, 0, barX + fillW, 0);
           barGrad.addColorStop(0, '#F472B6');
           barGrad.addColorStop(1, '#DB2777');
-          drawRoundRect(ctx, barX, rowY, fillW, 20, 10, barGrad);
+          drawRoundRect(ctx, barX, rowY, fillW, barHeight, 10, barGrad);
         }
 
         ctx.fillStyle = item.count > 0 ? '#BE185D' : '#9CA3AF';
@@ -2721,20 +2727,25 @@
         ctx.textAlign = 'left';
       });
 
-      drawRoundRect(ctx, 56, 932, 968, 336, 26, '#FFFFFF', '#FBCFE8', 2);
+      const top5CardTop = yearCardBottom + 24;
+      const top5CardHeight = 336;
+      const top5TitleY = top5CardTop + 50;
+      const top5ListStartY = top5CardTop + 92;
+
+      drawRoundRect(ctx, 56, top5CardTop, 968, top5CardHeight, 26, '#FFFFFF', '#FBCFE8', 2);
       ctx.fillStyle = '#1F2937';
       ctx.font = 'bold 28px "Noto Sans TC", sans-serif';
-      ctx.fillText('現場出現比例前五名（Top 5）', 88, 982);
+      ctx.fillText('現場出現比例前五名（Top 5）', 88, top5TitleY);
 
       if (!data.top5 || data.top5.length === 0) {
         ctx.fillStyle = '#9CA3AF';
         ctx.font = '24px "Noto Sans TC", sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('尚未加入參戰場次，加入後即可解鎖專屬 Top 5 榜單！', 540, 1120);
+        ctx.fillText('尚未加入參戰場次，加入後即可解鎖專屬 Top 5 榜單！', 540, top5CardTop + 188);
         ctx.textAlign = 'left';
       } else {
         data.top5.forEach((song, idx) => {
-          const itemY = 1024 + idx * 46;
+          const itemY = top5ListStartY + idx * 46;
           const badgeColors = ['#DB2777', '#EC4899', '#F472B6', '#F9A8D4', '#F9A8D4'];
           drawRoundRect(ctx, 88, itemY - 24, 36, 32, 10, badgeColors[idx]);
           ctx.fillStyle = '#FFFFFF';
@@ -2755,11 +2766,15 @@
         });
       }
 
+      const top5CardBottom = top5CardTop + top5CardHeight;
+      const footerY = top5CardBottom + 44;
+
       ctx.fillStyle = '#9D174D';
       ctx.font = '20px "Noto Sans TC", sans-serif';
       ctx.textAlign = 'center';
       const todayStr = new Date().toISOString().slice(0, 10);
-      ctx.fillText(`櫻坂46 歷年歌單與參戰統計 ・ Generated on ${todayStr}`, 540, 1312);
+      ctx.fillText(`櫻坂46 歷年歌單與參戰統計 ・ Generated on ${todayStr}`, 540, footerY);
+      ctx.textAlign = 'left';
 
       currentReportDataUrl = canvas.toDataURL('image/png');
       return new Promise(resolve => {

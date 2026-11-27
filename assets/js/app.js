@@ -2633,7 +2633,7 @@
 
       ctx.fillStyle = '#1F2937';
       ctx.font = 'bold 38px "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif';
-      ctx.fillText('櫻坂46 歷年參戰履歷', 172, 114);
+      ctx.fillText('櫻坂46 歷年參戰履歷', 172, 134);
 
       ctx.fillStyle = '#6B7280';
       ctx.font = '24px "Noto Sans TC", sans-serif';
